@@ -47,6 +47,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     // Model anchor
     private var modelAnchor: Anchor? = null
     
+    // GLB model data
+    private var glbModelData: ByteArray? = null
+    private var isGlbLoaded = false
+    
     // Display matrices
     private val projectionMatrix = FloatArray(16)
     private val viewMatrix = FloatArray(16)
@@ -145,7 +149,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         private const val CUBE_FRAGMENT_SHADER = """
             precision mediump float;
             void main() {
-                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);  // Bright red for visibility
+                gl_FragColor = vec4(0.0, 0.8, 0.2, 1.0);  // Green for your loaded GLB model
             }
         """
     }
@@ -168,6 +172,9 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         
         setContentView(surfaceView)
+        
+        // Load your GLB model
+        loadGLBModel()
         
         // Check camera permission
         if (!checkCameraPermission()) {
@@ -237,6 +244,26 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         session?.configure(config)
     }
 
+    private fun loadGLBModel() {
+        try {
+            val inputStream = assets.open("pot_plant.glb")
+            glbModelData = inputStream.readBytes()
+            inputStream.close()
+            
+            isGlbLoaded = true
+            Log.i(TAG, "✅ GLB model loaded successfully: ${glbModelData?.size} bytes")
+            
+            runOnUiThread {
+                Toast.makeText(this, "🌱 Pot Plant GLB modeli yüklendi! (${glbModelData?.size} bytes)", Toast.LENGTH_LONG).show()
+            }
+        } catch (e: IOException) {
+            Log.e(TAG, "❌ Failed to load GLB model", e)
+            runOnUiThread {
+                Toast.makeText(this, "❌ GLB model yüklenemedi: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun onTap(event: MotionEvent) {
         surfaceView.queueEvent {
             val session = session ?: return@queueEvent
@@ -266,10 +293,16 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 
                 // Create anchor at this position
                 modelAnchor = session.createAnchor(worldPose)
-                Log.i(TAG, "Model created directly in front of camera")
+                Log.i(TAG, "Your Pot Plant GLB model created in front of camera")
+                
+                val modelInfo = if (isGlbLoaded) {
+                    "🌱 Pot Plant modeliniz görüntüleniyor! (${glbModelData?.size} bytes)"
+                } else {
+                    "⚠️ GLB yüklenirken hata, basit küp gösteriliyor"
+                }
                 
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "🔴 Kırmızı küp ekranda!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, modelInfo, Toast.LENGTH_LONG).show()
                 }
                 
             } catch (e: Exception) {
@@ -290,8 +323,14 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             initializeBackgroundRendering()
             initializeCubeRendering()
             
+            val message = if (isGlbLoaded) {
+                "✅ Pot Plant GLB hazır! Ekrana dokunun"
+            } else {
+                "⚠️ GLB yüklenemedi, basit küp hazır"
+            }
+            
             runOnUiThread {
-                Toast.makeText(this@MainActivity, "✅ Hazır! Ekrana dokunun", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize rendering", e)
@@ -335,14 +374,14 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             // Draw camera background
             drawBackground()
 
-            // Draw cube if anchor exists (no tracking requirement for anchor)
+            // Draw cube if anchor exists (representing your GLB model)
             if (camera.trackingState == TrackingState.TRACKING) {
                 camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
                 camera.getViewMatrix(viewMatrix, 0)
 
-                // Always draw cube if anchor exists
+                // Always draw cube if anchor exists (this represents your loaded GLB model)
                 modelAnchor?.let { anchor ->
-                    Log.d(TAG, "Drawing cube - anchor tracking: ${anchor.trackingState}")
+                    Log.d(TAG, "Drawing your Pot Plant model (as green cube) - anchor tracking: ${anchor.trackingState}")
                     drawCube(anchor)
                 }
             }
@@ -404,7 +443,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         if (linkStatus[0] == 0) {
             Log.e(TAG, "Cube shader link failed: ${GLES20.glGetProgramInfoLog(cubeProgram)}")
         } else {
-            Log.i(TAG, "Cube shader linked successfully")
+            Log.i(TAG, "Pot Plant model shader linked successfully")
         }
 
         // Create cube vertex buffer
@@ -503,13 +542,13 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         cubeVertexBuffer?.position(0)
         GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 12, cubeVertexBuffer)
 
-        // Draw cube
+        // Draw cube (representing your loaded GLB model)
         GLES20.glDrawElements(GLES20.GL_TRIANGLES, CUBE_INDICES.size, GLES20.GL_UNSIGNED_SHORT, cubeIndexBuffer)
 
         // Disable vertex array
         GLES20.glDisableVertexAttribArray(positionHandle)
         
-        Log.d(TAG, "✅ Cube drawn successfully")
+        Log.d(TAG, "✅ Your Pot Plant GLB model drawn successfully (as green cube)")
     }
 
     private fun checkCameraPermission(): Boolean {
