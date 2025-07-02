@@ -47,6 +47,9 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private val modelMatrix = FloatArray(16)
     private val modelViewMatrix = FloatArray(16)
     private val modelViewProjectionMatrix = FloatArray(16)
+    
+    // Background texture renderer ID
+    private var backgroundTextureId = 0
 
     companion object {
         private const val CAMERA_PERMISSION_CODE = 0
@@ -65,7 +68,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         
         surfaceView.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_DOWN) {
-                onSingleTap(event)
+                handleTap(event)
             }
             true
         }
@@ -118,13 +121,15 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 message = "Cihaz ARCore desteklemiyor"
                 exception = e
             } catch (e: Exception) {
-                message = "ARCore oturumu oluşturulamadı"
+                message = "ArCore oturumu oluşturulamadı"
                 exception = e
             }
 
             if (message != null) {
                 Log.e(TAG, "Exception creating session", exception)
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                runOnUiThread {
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                }
                 return
             }
         }
@@ -169,31 +174,53 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         session?.configure(config)
     }
 
-    private fun onSingleTap(event: MotionEvent) {
-        val frame = session?.update() ?: return
-        
-        if (frame.camera.trackingState != TrackingState.TRACKING) {
-            return
+    private fun handleTap(event: MotionEvent) {
+        // Schedule this for the next frame update on the main thread
+        surfaceView.queueEvent {
+            performHitTest(event.x, event.y)
         }
+    }
 
-        val hits = frame.hitTest(event.x, event.y)
-        for (hit in hits) {
-            val trackable = hit.trackable
-            if (trackable is Plane && trackable.isPoseInPolygon(hit.hitPose)) {
-                // Clear existing anchor
-                modelAnchor?.detach()
-                
-                // Create new anchor
-                modelAnchor = hit.createAnchor()
-                Toast.makeText(this, "Model yerleştirildi!", Toast.LENGTH_SHORT).show()
-                break
+    private fun performHitTest(x: Float, y: Float) {
+        val session = session ?: return
+        
+        try {
+            val frame = session.update()
+            
+            if (frame.camera.trackingState != TrackingState.TRACKING) {
+                return
             }
+
+            val hits = frame.hitTest(x, y)
+            for (hit in hits) {
+                val trackable = hit.trackable
+                if (trackable is Plane && trackable.isPoseInPolygon(hit.hitPose)) {
+                    // Clear existing anchor
+                    modelAnchor?.detach()
+                    
+                    // Create new anchor
+                    modelAnchor = hit.createAnchor()
+                    
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, "Model yerleştirildi!", Toast.LENGTH_SHORT).show()
+                    }
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during hit test", e)
         }
     }
 
     // GLSurfaceView.Renderer implementation
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        
+        // Generate background texture
+        val textures = IntArray(1)
+        GLES20.glGenTextures(1, textures, 0)
+        backgroundTextureId = textures[0]
         
         // Load GLB model here in the future
         loadGLBModel()
@@ -216,23 +243,28 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         val session = session ?: return
 
         try {
-            session.setCameraTextureName(0)
+            // Set the camera texture
+            session.setCameraTextureName(backgroundTextureId)
+            
             val frame = session.update()
             val camera = frame.camera
+            
+            // Only draw if tracking
+            if (camera.trackingState == TrackingState.TRACKING) {
+                // Get projection matrix
+                camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
 
-            // Get projection matrix
-            camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
+                // Get camera matrix and draw
+                camera.getViewMatrix(viewMatrix, 0)
 
-            // Get camera matrix and draw
-            camera.getViewMatrix(viewMatrix, 0)
+                // Draw planes
+                drawPlanes(frame)
 
-            // Draw planes
-            drawPlanes(frame)
-
-            // Draw model if anchor exists
-            modelAnchor?.let { anchor ->
-                if (anchor.trackingState == TrackingState.TRACKING) {
-                    drawModel(anchor)
+                // Draw model if anchor exists
+                modelAnchor?.let { anchor ->
+                    if (anchor.trackingState == TrackingState.TRACKING) {
+                        drawModel(anchor)
+                    }
                 }
             }
 
@@ -270,13 +302,18 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         
         // Simple colored cube vertices and rendering would go here
         // For now, just a placeholder that indicates where the model would be
+        Log.d(TAG, "Drawing placeholder cube")
     }
 
     private fun loadGLBModel() {
         // Simplified - just render a simple cube for now
         // GLB loading will be added in a future iteration
         Log.i(TAG, "Basit geometrik şekil hazırlandı - GLB loading gelecek güncellemede eklenecek")
-        Toast.makeText(this, "Yüzeyi dokunarak küp yerleştirin", Toast.LENGTH_LONG).show()
+        
+        // Move Toast to main thread
+        runOnUiThread {
+            Toast.makeText(this@MainActivity, "Yüzeyi dokunarak küp yerleştirin", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun checkCameraPermission(): Boolean {
