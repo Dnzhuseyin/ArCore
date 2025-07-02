@@ -56,6 +56,9 @@ dependencies {
     // ArCore dependencies
     implementation("com.google.ar:core:1.42.0")
     
+    // Simple 3D model rendering
+    implementation("de.javagl:obj:0.4.0")  // For basic 3D model support
+    
     // Camera and permissions
     implementation("androidx.camera:camera-camera2:1.3.1")
     implementation("androidx.camera:camera-lifecycle:1.3.1")

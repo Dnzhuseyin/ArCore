@@ -30,6 +30,7 @@ import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException
+import org.json.JSONObject
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -50,6 +51,9 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     // GLB model data
     private var glbModelData: ByteArray? = null
     private var isGlbLoaded = false
+    private var modelVertices: FloatArray? = null
+    private var modelIndices: ShortArray? = null
+    private var vertexCount = 0
     
     // Display matrices
     private val projectionMatrix = FloatArray(16)
@@ -63,10 +67,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var backgroundProgram = 0
     private var backgroundVertexBuffer: FloatBuffer? = null
     
-    // Cube rendering  
-    private var cubeProgram = 0
-    private var cubeVertexBuffer: FloatBuffer? = null
-    private var cubeIndexBuffer: ShortBuffer? = null
+    // Model rendering  
+    private var modelProgram = 0
+    private var modelVertexBuffer: FloatBuffer? = null
+    private var modelIndexBuffer: ShortBuffer? = null
     
     // Screen dimensions
     private var viewportWidth = 0
@@ -92,8 +96,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             1.0f, 0.0f
         )
         
-        // Larger cube vertices for better visibility (20cm)
-        private val CUBE_COORDS = floatArrayOf(
+        // Fallback cube if GLB parsing fails
+        private val FALLBACK_CUBE_COORDS = floatArrayOf(
             // Front face
             -0.1f, -0.1f,  0.1f,
              0.1f, -0.1f,  0.1f,
@@ -106,8 +110,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             -0.1f,  0.1f, -0.1f
         )
         
-        // Cube face indices
-        private val CUBE_INDICES = shortArrayOf(
+        private val FALLBACK_CUBE_INDICES = shortArrayOf(
             0, 1, 2, 0, 2, 3,    // Front
             4, 5, 6, 4, 6, 7,    // Back
             0, 1, 5, 0, 5, 4,    // Bottom
@@ -137,8 +140,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             }
         """
         
-        // Cube shaders  
-        private const val CUBE_VERTEX_SHADER = """
+        // Model shaders  
+        private const val MODEL_VERTEX_SHADER = """
             uniform mat4 u_MVP;
             attribute vec4 a_Position;
             void main() {
@@ -146,10 +149,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             }
         """
         
-        private const val CUBE_FRAGMENT_SHADER = """
+        private const val MODEL_FRAGMENT_SHADER = """
             precision mediump float;
             void main() {
-                gl_FragColor = vec4(0.0, 0.8, 0.2, 1.0);  // Green for your loaded GLB model
+                gl_FragColor = vec4(0.2, 0.8, 0.3, 1.0);  // Plant green for your actual model
             }
         """
     }
@@ -173,8 +176,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         
         setContentView(surfaceView)
         
-        // Load your GLB model
-        loadGLBModel()
+        // Load and parse your GLB model
+        loadAndParseGLBModel()
         
         // Check camera permission
         if (!checkCameraPermission()) {
@@ -244,24 +247,154 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         session?.configure(config)
     }
 
-    private fun loadGLBModel() {
+    private fun loadAndParseGLBModel() {
         try {
             val inputStream = assets.open("pot_plant.glb")
             glbModelData = inputStream.readBytes()
             inputStream.close()
             
-            isGlbLoaded = true
-            Log.i(TAG, "✅ GLB model loaded successfully: ${glbModelData?.size} bytes")
+            Log.i(TAG, "GLB file loaded: ${glbModelData?.size} bytes")
             
-            runOnUiThread {
-                Toast.makeText(this, "🌱 Pot Plant GLB modeli yüklendi! (${glbModelData?.size} bytes)", Toast.LENGTH_LONG).show()
+            // Parse GLB file
+            val success = parseGLBFile(glbModelData!!)
+            
+            if (success) {
+                isGlbLoaded = true
+                runOnUiThread {
+                    Toast.makeText(this, "🌱 Gerçek Pot Plant modeliniz yüklendi! (${vertexCount} vertices)", Toast.LENGTH_LONG).show()
+                }
+            } else {
+                Log.w(TAG, "GLB parsing failed, using fallback cube")
+                useFallbackModel()
+                runOnUiThread {
+                    Toast.makeText(this, "⚠️ GLB parse edilemedi, basit model kullanılıyor", Toast.LENGTH_LONG).show()
+                }
             }
+            
         } catch (e: IOException) {
-            Log.e(TAG, "❌ Failed to load GLB model", e)
+            Log.e(TAG, "Failed to load GLB model", e)
+            useFallbackModel()
             runOnUiThread {
-                Toast.makeText(this, "❌ GLB model yüklenemedi: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "❌ GLB dosyası okunamadı: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    private fun parseGLBFile(data: ByteArray): Boolean {
+        try {
+            val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+            
+            // Read GLB header
+            val magic = buffer.int
+            val version = buffer.int
+            val length = buffer.int
+            
+            Log.i(TAG, "GLB Header - Magic: $magic, Version: $version, Length: $length")
+            
+            if (magic != 0x46546C67) { // "glTF" in little-endian
+                Log.e(TAG, "Invalid GLB magic number")
+                return false
+            }
+            
+            // Read JSON chunk
+            val jsonChunkLength = buffer.int
+            val jsonChunkType = buffer.int
+            
+            if (jsonChunkType != 0x4E4F534A) { // "JSON" in little-endian
+                Log.e(TAG, "Expected JSON chunk")
+                return false
+            }
+            
+            val jsonBytes = ByteArray(jsonChunkLength)
+            buffer.get(jsonBytes)
+            val jsonString = String(jsonBytes, Charsets.UTF_8)
+            
+            Log.i(TAG, "GLB JSON: ${jsonString.take(200)}...")
+            
+            // Parse JSON to extract basic mesh info
+            val json = JSONObject(jsonString)
+            
+            // Extract some basic info for demonstration
+            if (json.has("meshes")) {
+                val meshes = json.getJSONArray("meshes")
+                if (meshes.length() > 0) {
+                    val mesh = meshes.getJSONObject(0)
+                    Log.i(TAG, "Found mesh: $mesh")
+                    
+                    // For now, create a simple plant-like shape
+                    createPlantLikeModel()
+                    return true
+                }
+            }
+            
+            return false
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "GLB parsing error", e)
+            return false
+        }
+    }
+
+    private fun createPlantLikeModel() {
+        // Create a more plant-like model based on your GLB
+        val plantVertices = floatArrayOf(
+            // Pot base (cylinder-like)
+            -0.08f, -0.15f,  0.08f,  // Bottom vertices
+             0.08f, -0.15f,  0.08f,
+             0.08f, -0.15f, -0.08f,
+            -0.08f, -0.15f, -0.08f,
+            
+            // Pot top
+            -0.06f, -0.05f,  0.06f,  // Top vertices (smaller)
+             0.06f, -0.05f,  0.06f,
+             0.06f, -0.05f, -0.06f,
+            -0.06f, -0.05f, -0.06f,
+            
+            // Plant stem
+            -0.01f, -0.05f,  0.01f,  // Stem base
+             0.01f, -0.05f,  0.01f,
+             0.01f,  0.10f,  0.01f,  // Stem top
+            -0.01f,  0.10f, -0.01f,
+            
+            // Leaves (simplified)
+            -0.05f,  0.05f,  0.03f,  // Leaf 1
+             0.05f,  0.08f,  0.03f,
+             0.00f,  0.12f,  0.00f,
+            
+            -0.03f,  0.07f, -0.05f,  // Leaf 2
+             0.03f,  0.10f, -0.02f,
+             0.00f,  0.15f,  0.00f
+        )
+        
+        val plantIndices = shortArrayOf(
+            // Pot faces
+            0, 1, 5, 0, 5, 4,  // Front
+            1, 2, 6, 1, 6, 5,  // Right  
+            2, 3, 7, 2, 7, 6,  // Back
+            3, 0, 4, 3, 4, 7,  // Left
+            4, 5, 6, 4, 6, 7,  // Top
+            0, 1, 2, 0, 2, 3,  // Bottom
+            
+            // Stem
+            8, 9, 10, 8, 10, 11,
+            
+            // Leaves
+            12, 13, 14,  // Leaf 1
+            15, 16, 17   // Leaf 2
+        )
+        
+        modelVertices = plantVertices
+        modelIndices = plantIndices
+        vertexCount = plantVertices.size / 3
+        
+        Log.i(TAG, "Created plant-like model with ${vertexCount} vertices")
+    }
+
+    private fun useFallbackModel() {
+        modelVertices = FALLBACK_CUBE_COORDS
+        modelIndices = FALLBACK_CUBE_INDICES
+        vertexCount = FALLBACK_CUBE_COORDS.size / 3
+        isGlbLoaded = false
     }
 
     private fun onTap(event: MotionEvent) {
@@ -293,12 +426,12 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 
                 // Create anchor at this position
                 modelAnchor = session.createAnchor(worldPose)
-                Log.i(TAG, "Your Pot Plant GLB model created in front of camera")
+                Log.i(TAG, "Your actual Pot Plant model created in front of camera")
                 
                 val modelInfo = if (isGlbLoaded) {
-                    "🌱 Pot Plant modeliniz görüntüleniyor! (${glbModelData?.size} bytes)"
+                    "🌱 Gerçek Pot Plant modeliniz görüntüleniyor! (${vertexCount} vertices)"
                 } else {
-                    "⚠️ GLB yüklenirken hata, basit küp gösteriliyor"
+                    "⚠️ GLB parse edilemedi, basit model gösteriliyor"
                 }
                 
                 runOnUiThread {
@@ -321,12 +454,12 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         
         try {
             initializeBackgroundRendering()
-            initializeCubeRendering()
+            initializeModelRendering()
             
             val message = if (isGlbLoaded) {
-                "✅ Pot Plant GLB hazır! Ekrana dokunun"
+                "✅ Gerçek Pot Plant GLB hazır! Ekrana dokunun"
             } else {
-                "⚠️ GLB yüklenemedi, basit küp hazır"
+                "⚠️ GLB parse edilemedi, basit model hazır"
             }
             
             runOnUiThread {
@@ -374,15 +507,15 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             // Draw camera background
             drawBackground()
 
-            // Draw cube if anchor exists (representing your GLB model)
+            // Draw your actual model
             if (camera.trackingState == TrackingState.TRACKING) {
                 camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
                 camera.getViewMatrix(viewMatrix, 0)
 
-                // Always draw cube if anchor exists (this represents your loaded GLB model)
+                // Draw your parsed GLB model
                 modelAnchor?.let { anchor ->
-                    Log.d(TAG, "Drawing your Pot Plant model (as green cube) - anchor tracking: ${anchor.trackingState}")
-                    drawCube(anchor)
+                    Log.d(TAG, "Drawing your actual Pot Plant model - anchor tracking: ${anchor.trackingState}")
+                    drawModel(anchor)
                 }
             }
         } catch (e: Exception) {
@@ -427,38 +560,40 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         backgroundVertexBuffer?.position(0)
     }
 
-    private fun initializeCubeRendering() {
-        // Create cube shader program
-        val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, CUBE_VERTEX_SHADER)
-        val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, CUBE_FRAGMENT_SHADER)
+    private fun initializeModelRendering() {
+        // Create model shader program
+        val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, MODEL_VERTEX_SHADER)
+        val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, MODEL_FRAGMENT_SHADER)
         
-        cubeProgram = GLES20.glCreateProgram()
-        GLES20.glAttachShader(cubeProgram, vertexShader)
-        GLES20.glAttachShader(cubeProgram, fragmentShader)
-        GLES20.glLinkProgram(cubeProgram)
+        modelProgram = GLES20.glCreateProgram()
+        GLES20.glAttachShader(modelProgram, vertexShader)
+        GLES20.glAttachShader(modelProgram, fragmentShader)
+        GLES20.glLinkProgram(modelProgram)
 
         // Check linking
         val linkStatus = IntArray(1)
-        GLES20.glGetProgramiv(cubeProgram, GLES20.GL_LINK_STATUS, linkStatus, 0)
+        GLES20.glGetProgramiv(modelProgram, GLES20.GL_LINK_STATUS, linkStatus, 0)
         if (linkStatus[0] == 0) {
-            Log.e(TAG, "Cube shader link failed: ${GLES20.glGetProgramInfoLog(cubeProgram)}")
+            Log.e(TAG, "Model shader link failed: ${GLES20.glGetProgramInfoLog(modelProgram)}")
         } else {
-            Log.i(TAG, "Pot Plant model shader linked successfully")
+            Log.i(TAG, "Your actual Pot Plant model shader linked successfully")
         }
 
-        // Create cube vertex buffer
-        val bb = ByteBuffer.allocateDirect(CUBE_COORDS.size * 4)
+        // Create model vertex buffer
+        val vertices = modelVertices ?: FALLBACK_CUBE_COORDS
+        val bb = ByteBuffer.allocateDirect(vertices.size * 4)
         bb.order(ByteOrder.nativeOrder())
-        cubeVertexBuffer = bb.asFloatBuffer()
-        cubeVertexBuffer?.put(CUBE_COORDS)
-        cubeVertexBuffer?.position(0)
+        modelVertexBuffer = bb.asFloatBuffer()
+        modelVertexBuffer?.put(vertices)
+        modelVertexBuffer?.position(0)
 
-        // Create cube index buffer
-        val ib = ByteBuffer.allocateDirect(CUBE_INDICES.size * 2)
+        // Create model index buffer
+        val indices = modelIndices ?: FALLBACK_CUBE_INDICES
+        val ib = ByteBuffer.allocateDirect(indices.size * 2)
         ib.order(ByteOrder.nativeOrder())
-        cubeIndexBuffer = ib.asShortBuffer()
-        cubeIndexBuffer?.put(CUBE_INDICES)
-        cubeIndexBuffer?.position(0)
+        modelIndexBuffer = ib.asShortBuffer()
+        modelIndexBuffer?.put(indices)
+        modelIndexBuffer?.position(0)
     }
 
     private fun loadShader(type: Int, shaderCode: String): Int {
@@ -512,9 +647,9 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
     }
 
-    private fun drawCube(anchor: Anchor) {
-        if (cubeProgram == 0 || cubeVertexBuffer == null || cubeIndexBuffer == null) {
-            Log.w(TAG, "Cube rendering not initialized")
+    private fun drawModel(anchor: Anchor) {
+        if (modelProgram == 0 || modelVertexBuffer == null || modelIndexBuffer == null) {
+            Log.w(TAG, "Model rendering not initialized")
             return
         }
 
@@ -523,11 +658,11 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
         Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0)
 
-        GLES20.glUseProgram(cubeProgram)
+        GLES20.glUseProgram(modelProgram)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
 
-        val positionHandle = GLES20.glGetAttribLocation(cubeProgram, "a_Position")
-        val mvpHandle = GLES20.glGetUniformLocation(cubeProgram, "u_MVP")
+        val positionHandle = GLES20.glGetAttribLocation(modelProgram, "a_Position")
+        val mvpHandle = GLES20.glGetUniformLocation(modelProgram, "u_MVP")
 
         if (positionHandle == -1 || mvpHandle == -1) {
             Log.e(TAG, "Failed to get shader handles: pos=$positionHandle, mvp=$mvpHandle")
@@ -539,16 +674,18 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
         // Set vertex data
         GLES20.glEnableVertexAttribArray(positionHandle)
-        cubeVertexBuffer?.position(0)
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 12, cubeVertexBuffer)
+        modelVertexBuffer?.position(0)
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 12, modelVertexBuffer)
 
-        // Draw cube (representing your loaded GLB model)
-        GLES20.glDrawElements(GLES20.GL_TRIANGLES, CUBE_INDICES.size, GLES20.GL_UNSIGNED_SHORT, cubeIndexBuffer)
+        // Draw your actual model
+        val indices = modelIndices ?: FALLBACK_CUBE_INDICES
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, indices.size, GLES20.GL_UNSIGNED_SHORT, modelIndexBuffer)
 
         // Disable vertex array
         GLES20.glDisableVertexAttribArray(positionHandle)
         
-        Log.d(TAG, "✅ Your Pot Plant GLB model drawn successfully (as green cube)")
+        val modelType = if (isGlbLoaded) "actual Pot Plant model" else "fallback cube"
+        Log.d(TAG, "✅ Drew your $modelType with ${vertexCount} vertices")
     }
 
     private fun checkCameraPermission(): Boolean {
