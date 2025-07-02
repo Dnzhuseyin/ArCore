@@ -23,6 +23,7 @@ import com.google.ar.core.Point
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.Anchor
+import com.google.ar.core.Pose
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.UnavailableApkTooOldException
 import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException
@@ -87,18 +88,18 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             1.0f, 0.0f
         )
         
-        // Simple cube vertices (position only)
+        // Larger cube vertices for better visibility (20cm)
         private val CUBE_COORDS = floatArrayOf(
             // Front face
-            -0.05f, -0.05f,  0.05f,
-             0.05f, -0.05f,  0.05f,
-             0.05f,  0.05f,  0.05f,
-            -0.05f,  0.05f,  0.05f,
+            -0.1f, -0.1f,  0.1f,
+             0.1f, -0.1f,  0.1f,
+             0.1f,  0.1f,  0.1f,
+            -0.1f,  0.1f,  0.1f,
             // Back face
-            -0.05f, -0.05f, -0.05f,
-             0.05f, -0.05f, -0.05f,
-             0.05f,  0.05f, -0.05f,
-            -0.05f,  0.05f, -0.05f
+            -0.1f, -0.1f, -0.1f,
+             0.1f, -0.1f, -0.1f,
+             0.1f,  0.1f, -0.1f,
+            -0.1f,  0.1f, -0.1f
         )
         
         // Cube face indices
@@ -144,7 +145,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         private const val CUBE_FRAGMENT_SHADER = """
             precision mediump float;
             void main() {
-                gl_FragColor = vec4(0.0, 0.7, 1.0, 1.0);  // Light blue
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);  // Bright red for visibility
             }
         """
     }
@@ -231,7 +232,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     private fun configureSession() {
         val config = Config(session)
-        config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+        // NO plane finding - we don't need it
+        config.planeFindingMode = Config.PlaneFindingMode.DISABLED
         session?.configure(config)
     }
 
@@ -248,28 +250,33 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     return@queueEvent
                 }
 
-                val hits = frame.hitTest(event.x, event.y)
-                for (hit in hits) {
-                    val trackable = hit.trackable
-                    if (trackable is Plane && trackable.isPoseInPolygon(hit.hitPose)) {
-                        // Remove existing anchor
-                        modelAnchor?.detach()
-                        
-                        // Create new anchor
-                        modelAnchor = hit.createAnchor()
-                        
-                        runOnUiThread {
-                            Toast.makeText(this@MainActivity, "✓ Mavi küp yerleştirildi!", Toast.LENGTH_SHORT).show()
-                        }
-                        return@queueEvent
-                    }
-                }
+                // Remove existing anchor
+                modelAnchor?.detach()
+                
+                // Create pose directly in front of camera (50cm away)
+                val camera = frame.camera
+                val cameraPos = camera.pose
+                
+                // Create a pose 50cm in front of camera
+                val translation = floatArrayOf(0f, 0f, -0.5f)  // 50cm in front
+                val rotation = floatArrayOf(0f, 0f, 0f, 1f)    // No rotation
+                
+                val forwardPose = Pose(translation, rotation)
+                val worldPose = cameraPos.compose(forwardPose)
+                
+                // Create anchor at this position
+                modelAnchor = session.createAnchor(worldPose)
+                Log.i(TAG, "Model created directly in front of camera")
                 
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Yüzey bulunamadı, biraz daha tarayın", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "🔴 Kırmızı küp ekranda!", Toast.LENGTH_SHORT).show()
                 }
+                
             } catch (e: Exception) {
-                Log.e(TAG, "Error in hit test", e)
+                Log.e(TAG, "Error creating model", e)
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Model oluşturulamadı: ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
@@ -284,7 +291,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             initializeCubeRendering()
             
             runOnUiThread {
-                Toast.makeText(this@MainActivity, "ArCore hazır! Yüzeyleri tarayın", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "✅ Hazır! Ekrana dokunun", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize rendering", e)
@@ -328,16 +335,15 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             // Draw camera background
             drawBackground()
 
-            // Draw AR content if tracking
+            // Draw cube if anchor exists (no tracking requirement for anchor)
             if (camera.trackingState == TrackingState.TRACKING) {
                 camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
                 camera.getViewMatrix(viewMatrix, 0)
 
-                // Draw cube if anchor exists
+                // Always draw cube if anchor exists
                 modelAnchor?.let { anchor ->
-                    if (anchor.trackingState == TrackingState.TRACKING) {
-                        drawCube(anchor)
-                    }
+                    Log.d(TAG, "Drawing cube - anchor tracking: ${anchor.trackingState}")
+                    drawCube(anchor)
                 }
             }
         } catch (e: Exception) {
@@ -391,6 +397,15 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         GLES20.glAttachShader(cubeProgram, vertexShader)
         GLES20.glAttachShader(cubeProgram, fragmentShader)
         GLES20.glLinkProgram(cubeProgram)
+
+        // Check linking
+        val linkStatus = IntArray(1)
+        GLES20.glGetProgramiv(cubeProgram, GLES20.GL_LINK_STATUS, linkStatus, 0)
+        if (linkStatus[0] == 0) {
+            Log.e(TAG, "Cube shader link failed: ${GLES20.glGetProgramInfoLog(cubeProgram)}")
+        } else {
+            Log.i(TAG, "Cube shader linked successfully")
+        }
 
         // Create cube vertex buffer
         val bb = ByteBuffer.allocateDirect(CUBE_COORDS.size * 4)
@@ -459,7 +474,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     private fun drawCube(anchor: Anchor) {
-        if (cubeProgram == 0 || cubeVertexBuffer == null || cubeIndexBuffer == null) return
+        if (cubeProgram == 0 || cubeVertexBuffer == null || cubeIndexBuffer == null) {
+            Log.w(TAG, "Cube rendering not initialized")
+            return
+        }
 
         // Calculate model matrix
         anchor.pose.toMatrix(modelMatrix, 0)
@@ -471,6 +489,11 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
         val positionHandle = GLES20.glGetAttribLocation(cubeProgram, "a_Position")
         val mvpHandle = GLES20.glGetUniformLocation(cubeProgram, "u_MVP")
+
+        if (positionHandle == -1 || mvpHandle == -1) {
+            Log.e(TAG, "Failed to get shader handles: pos=$positionHandle, mvp=$mvpHandle")
+            return
+        }
 
         // Set MVP matrix
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, modelViewProjectionMatrix, 0)
@@ -485,6 +508,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
         // Disable vertex array
         GLES20.glDisableVertexAttribArray(positionHandle)
+        
+        Log.d(TAG, "✅ Cube drawn successfully")
     }
 
     private fun checkCameraPermission(): Boolean {
