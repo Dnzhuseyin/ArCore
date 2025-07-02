@@ -57,20 +57,54 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var backgroundVertexBuffer: FloatBuffer? = null
     private var backgroundProgram = 0
     
+    // Cube rendering
+    private var cubeVertexBuffer: FloatBuffer? = null
+    private var cubeProgram = 0
+    
     // Display size
     private var viewportWidth = 0
     private var viewportHeight = 0
+    private var displayRotation = 0
 
     companion object {
         private const val CAMERA_PERMISSION_CODE = 0
         private const val TAG = "ArCoreActivity"
         
-        // Background quad vertices
+        // Background quad vertices (portrait corrected)
         private val BACKGROUND_VERTICES = floatArrayOf(
-            -1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
-            1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
-            -1.0f, 1.0f, 0.0f, 0.0f, 1.0f,
-            1.0f, 1.0f, 0.0f, 1.0f, 1.0f
+            -1.0f, -1.0f, 0.0f, 0.0f, 1.0f,  // Bottom left
+            1.0f, -1.0f, 0.0f, 1.0f, 1.0f,   // Bottom right  
+            -1.0f, 1.0f, 0.0f, 0.0f, 0.0f,   // Top left
+            1.0f, 1.0f, 0.0f, 1.0f, 0.0f     // Top right
+        )
+        
+        // Cube vertices
+        private val CUBE_VERTICES = floatArrayOf(
+            // Front face
+            -0.1f, -0.1f,  0.1f,  0.0f, 0.0f, 1.0f,
+             0.1f, -0.1f,  0.1f,  0.0f, 0.0f, 1.0f,
+             0.1f,  0.1f,  0.1f,  0.0f, 0.0f, 1.0f,
+            -0.1f,  0.1f,  0.1f,  0.0f, 0.0f, 1.0f,
+            // Back face
+            -0.1f, -0.1f, -0.1f,  0.0f, 0.0f, -1.0f,
+             0.1f, -0.1f, -0.1f,  0.0f, 0.0f, -1.0f,
+             0.1f,  0.1f, -0.1f,  0.0f, 0.0f, -1.0f,
+            -0.1f,  0.1f, -0.1f,  0.0f, 0.0f, -1.0f
+        )
+        
+        private val CUBE_INDICES = shortArrayOf(
+            // Front
+            0, 1, 2, 2, 3, 0,
+            // Back
+            4, 5, 6, 6, 7, 4,
+            // Left
+            0, 3, 7, 7, 4, 0,
+            // Right
+            1, 2, 6, 6, 5, 1,
+            // Top
+            3, 2, 6, 6, 7, 3,
+            // Bottom
+            0, 1, 5, 5, 4, 0
         )
         
         private const val BACKGROUND_VERTEX_SHADER = """
@@ -90,6 +124,25 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             uniform samplerExternalOES u_Texture;
             void main() {
                 gl_FragColor = texture2D(u_Texture, v_TexCoord);
+            }
+        """
+        
+        private const val CUBE_VERTEX_SHADER = """
+            uniform mat4 u_ModelViewProjection;
+            attribute vec4 a_Position;
+            attribute vec3 a_Color;
+            varying vec3 v_Color;
+            void main() {
+                gl_Position = u_ModelViewProjection * a_Position;
+                v_Color = a_Color;
+            }
+        """
+        
+        private const val CUBE_FRAGMENT_SHADER = """
+            precision mediump float;
+            varying vec3 v_Color;
+            void main() {
+                gl_FragColor = vec4(v_Color, 1.0);
             }
         """
     }
@@ -226,10 +279,13 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val frame = session.update()
             
             if (frame.camera.trackingState != TrackingState.TRACKING) {
+                Log.d(TAG, "Camera not tracking yet")
                 return
             }
 
             val hits = frame.hitTest(x, y)
+            Log.d(TAG, "Hit test found ${hits.size} hits")
+            
             for (hit in hits) {
                 val trackable = hit.trackable
                 if (trackable is Plane && trackable.isPoseInPolygon(hit.hitPose)) {
@@ -238,6 +294,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     
                     // Create new anchor
                     modelAnchor = hit.createAnchor()
+                    Log.i(TAG, "Model anchor created at pose: ${hit.hitPose}")
                     
                     runOnUiThread {
                         Toast.makeText(this@MainActivity, "Model yerleştirildi!", Toast.LENGTH_SHORT).show()
@@ -264,6 +321,12 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         // Create background vertex buffer
         createBackgroundVertexBuffer()
         
+        // Create cube shader program
+        createCubeShader()
+        
+        // Create cube vertex buffer
+        createCubeVertexBuffer()
+        
         // Load GLB model here in the future
         loadGLBModel()
     }
@@ -283,7 +346,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         GLES20.glViewport(0, 0, width, height)
         
         // Get display rotation
-        val displayRotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        displayRotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             display?.rotation ?: 0
         } else {
             @Suppress("DEPRECATION")
@@ -318,15 +381,18 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                 // Get camera matrix and draw
                 camera.getViewMatrix(viewMatrix, 0)
 
-                // Draw planes
+                // Draw planes (debug visualization)
                 drawPlanes(frame)
 
                 // Draw model if anchor exists
                 modelAnchor?.let { anchor ->
                     if (anchor.trackingState == TrackingState.TRACKING) {
+                        Log.d(TAG, "Drawing model at anchor")
                         drawModel(anchor)
                     }
                 }
+            } else {
+                Log.d(TAG, "Camera tracking state: ${camera.trackingState}")
             }
 
         } catch (e: Throwable) {
@@ -356,10 +422,35 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         GLES20.glLinkProgram(backgroundProgram)
     }
 
+    private fun createCubeShader() {
+        val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, CUBE_VERTEX_SHADER)
+        val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, CUBE_FRAGMENT_SHADER)
+        
+        cubeProgram = GLES20.glCreateProgram()
+        GLES20.glAttachShader(cubeProgram, vertexShader)
+        GLES20.glAttachShader(cubeProgram, fragmentShader)
+        GLES20.glLinkProgram(cubeProgram)
+        
+        // Check linking status
+        val linkStatus = IntArray(1)
+        GLES20.glGetProgramiv(cubeProgram, GLES20.GL_LINK_STATUS, linkStatus, 0)
+        if (linkStatus[0] == 0) {
+            Log.e(TAG, "Error linking cube program: ${GLES20.glGetProgramInfoLog(cubeProgram)}")
+        }
+    }
+
     private fun loadShader(type: Int, shaderCode: String): Int {
         val shader = GLES20.glCreateShader(type)
         GLES20.glShaderSource(shader, shaderCode)
         GLES20.glCompileShader(shader)
+        
+        // Check compilation status
+        val compileStatus = IntArray(1)
+        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compileStatus, 0)
+        if (compileStatus[0] == 0) {
+            Log.e(TAG, "Error compiling shader: ${GLES20.glGetShaderInfoLog(shader)}")
+        }
+        
         return shader
     }
 
@@ -369,6 +460,14 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         backgroundVertexBuffer = bb.asFloatBuffer()
         backgroundVertexBuffer?.put(BACKGROUND_VERTICES)
         backgroundVertexBuffer?.position(0)
+    }
+
+    private fun createCubeVertexBuffer() {
+        val bb = ByteBuffer.allocateDirect(CUBE_VERTICES.size * 4)
+        bb.order(ByteOrder.nativeOrder())
+        cubeVertexBuffer = bb.asFloatBuffer()
+        cubeVertexBuffer?.put(CUBE_VERTICES)
+        cubeVertexBuffer?.position(0)
     }
 
     private fun drawBackground() {
@@ -406,16 +505,22 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     }
 
     private fun drawPlanes(frame: Frame) {
-        // Simple plane visualization - just for indication
-        for (plane in frame.getUpdatedTrackables(Plane::class.java)) {
+        // Log detected planes for debugging
+        val planes = frame.getUpdatedTrackables(Plane::class.java)
+        if (planes.isNotEmpty()) {
+            Log.d(TAG, "Detected ${planes.size} planes")
+        }
+        
+        for (plane in planes) {
             if (plane.trackingState == TrackingState.TRACKING) {
-                // Draw a simple representation of detected planes
-                // This is a placeholder - in a real app you'd render plane geometry
+                Log.d(TAG, "Plane tracking: ${plane.type}")
             }
         }
     }
 
     private fun drawModel(anchor: Anchor) {
+        if (cubeProgram == 0 || cubeVertexBuffer == null) return
+        
         // Get the current pose of the anchor
         anchor.pose.toMatrix(modelMatrix, 0)
         
@@ -423,18 +528,43 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
         Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0)
         
-        // Draw a simple cube as placeholder for the GLB model
+        // Draw the cube
         drawCube()
     }
 
     private fun drawCube() {
-        // This is a simple cube rendering as placeholder
-        // In a complete implementation, this would render the GLB model
+        if (cubeProgram == 0 || cubeVertexBuffer == null) return
+        
+        GLES20.glUseProgram(cubeProgram)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         
-        // Simple colored cube vertices and rendering would go here
-        // For now, just a placeholder that indicates where the model would be
-        Log.d(TAG, "Drawing placeholder cube")
+        // Get attribute and uniform locations
+        val positionHandle = GLES20.glGetAttribLocation(cubeProgram, "a_Position")
+        val colorHandle = GLES20.glGetAttribLocation(cubeProgram, "a_Color")
+        val mvpHandle = GLES20.glGetUniformLocation(cubeProgram, "u_ModelViewProjection")
+        
+        // Set MVP matrix
+        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, modelViewProjectionMatrix, 0)
+        
+        // Set vertex data
+        cubeVertexBuffer?.position(0)
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 24, cubeVertexBuffer)
+        GLES20.glEnableVertexAttribArray(positionHandle)
+        
+        cubeVertexBuffer?.position(3)
+        GLES20.glVertexAttribPointer(colorHandle, 3, GLES20.GL_FLOAT, false, 24, cubeVertexBuffer)
+        GLES20.glEnableVertexAttribArray(colorHandle)
+        
+        // Draw the cube faces
+        for (i in 0 until 6) {
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, i * 6, 6)
+        }
+        
+        // Clean up
+        GLES20.glDisableVertexAttribArray(positionHandle)
+        GLES20.glDisableVertexAttribArray(colorHandle)
+        
+        Log.d(TAG, "Cube drawn successfully")
     }
 
     private fun loadGLBModel() {
