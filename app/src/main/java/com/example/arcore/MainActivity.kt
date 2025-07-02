@@ -3,6 +3,7 @@ package com.example.arcore
 import android.Manifest
 import android.content.pm.PackageManager
 import android.opengl.GLES20
+import android.opengl.GLES11Ext
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Bundle
@@ -29,6 +30,9 @@ import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -48,12 +52,46 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private val modelViewMatrix = FloatArray(16)
     private val modelViewProjectionMatrix = FloatArray(16)
     
-    // Background texture renderer ID
+    // Background texture renderer
     private var backgroundTextureId = 0
+    private var backgroundVertexBuffer: FloatBuffer? = null
+    private var backgroundProgram = 0
+    
+    // Display size
+    private var viewportWidth = 0
+    private var viewportHeight = 0
 
     companion object {
         private const val CAMERA_PERMISSION_CODE = 0
         private const val TAG = "ArCoreActivity"
+        
+        // Background quad vertices
+        private val BACKGROUND_VERTICES = floatArrayOf(
+            -1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
+            1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
+            -1.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+            1.0f, 1.0f, 0.0f, 1.0f, 1.0f
+        )
+        
+        private const val BACKGROUND_VERTEX_SHADER = """
+            attribute vec4 a_Position;
+            attribute vec2 a_TexCoord;
+            varying vec2 v_TexCoord;
+            void main() {
+                gl_Position = a_Position;
+                v_TexCoord = a_TexCoord;
+            }
+        """
+        
+        private const val BACKGROUND_FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 v_TexCoord;
+            uniform samplerExternalOES u_Texture;
+            void main() {
+                gl_FragColor = texture2D(u_Texture, v_TexCoord);
+            }
+        """
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -217,24 +255,44 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         
-        // Generate background texture
-        val textures = IntArray(1)
-        GLES20.glGenTextures(1, textures, 0)
-        backgroundTextureId = textures[0]
+        // Create background texture
+        createBackgroundTexture()
+        
+        // Create background shader program
+        createBackgroundShader()
+        
+        // Create background vertex buffer
+        createBackgroundVertexBuffer()
         
         // Load GLB model here in the future
         loadGLBModel()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+        Log.i(TAG, "onSurfaceChanged: width=$width, height=$height")
+        
+        // Validate dimensions
+        if (width <= 0 || height <= 0) {
+            Log.e(TAG, "Invalid surface dimensions: ${width}x${height}")
+            return
+        }
+        
+        viewportWidth = width
+        viewportHeight = height
+        
         GLES20.glViewport(0, 0, width, height)
+        
+        // Get display rotation
         val displayRotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             display?.rotation ?: 0
         } else {
             @Suppress("DEPRECATION")
             windowManager.defaultDisplay.rotation
         }
+        
+        // Set display geometry with validated dimensions
         session?.setDisplayGeometry(displayRotation, width, height)
+        Log.i(TAG, "Display geometry set: rotation=$displayRotation, ${width}x${height}")
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -249,7 +307,10 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val frame = session.update()
             val camera = frame.camera
             
-            // Only draw if tracking
+            // Draw camera background
+            drawBackground()
+            
+            // Only draw AR content if tracking
             if (camera.trackingState == TrackingState.TRACKING) {
                 // Get projection matrix
                 camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100.0f)
@@ -271,6 +332,77 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         } catch (e: Throwable) {
             Log.e(TAG, "Exception on the OpenGL thread", e)
         }
+    }
+
+    private fun createBackgroundTexture() {
+        val textures = IntArray(1)
+        GLES20.glGenTextures(1, textures, 0)
+        backgroundTextureId = textures[0]
+        
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, backgroundTextureId)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+    }
+
+    private fun createBackgroundShader() {
+        val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, BACKGROUND_VERTEX_SHADER)
+        val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, BACKGROUND_FRAGMENT_SHADER)
+        
+        backgroundProgram = GLES20.glCreateProgram()
+        GLES20.glAttachShader(backgroundProgram, vertexShader)
+        GLES20.glAttachShader(backgroundProgram, fragmentShader)
+        GLES20.glLinkProgram(backgroundProgram)
+    }
+
+    private fun loadShader(type: Int, shaderCode: String): Int {
+        val shader = GLES20.glCreateShader(type)
+        GLES20.glShaderSource(shader, shaderCode)
+        GLES20.glCompileShader(shader)
+        return shader
+    }
+
+    private fun createBackgroundVertexBuffer() {
+        val bb = ByteBuffer.allocateDirect(BACKGROUND_VERTICES.size * 4)
+        bb.order(ByteOrder.nativeOrder())
+        backgroundVertexBuffer = bb.asFloatBuffer()
+        backgroundVertexBuffer?.put(BACKGROUND_VERTICES)
+        backgroundVertexBuffer?.position(0)
+    }
+
+    private fun drawBackground() {
+        if (backgroundProgram == 0 || backgroundVertexBuffer == null) return
+        
+        GLES20.glUseProgram(backgroundProgram)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        
+        // Get attribute locations
+        val positionHandle = GLES20.glGetAttribLocation(backgroundProgram, "a_Position")
+        val texCoordHandle = GLES20.glGetAttribLocation(backgroundProgram, "a_TexCoord")
+        val textureHandle = GLES20.glGetUniformLocation(backgroundProgram, "u_Texture")
+        
+        // Set vertex data
+        backgroundVertexBuffer?.position(0)
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 20, backgroundVertexBuffer)
+        GLES20.glEnableVertexAttribArray(positionHandle)
+        
+        backgroundVertexBuffer?.position(3)
+        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 20, backgroundVertexBuffer)
+        GLES20.glEnableVertexAttribArray(texCoordHandle)
+        
+        // Set texture
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, backgroundTextureId)
+        GLES20.glUniform1i(textureHandle, 0)
+        
+        // Draw
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        
+        // Clean up
+        GLES20.glDisableVertexAttribArray(positionHandle)
+        GLES20.glDisableVertexAttribArray(texCoordHandle)
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
     }
 
     private fun drawPlanes(frame: Frame) {
